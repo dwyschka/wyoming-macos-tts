@@ -9,7 +9,14 @@ from . import __version__
 _LOGGER = logging.getLogger("wyoming-macos-tts")
 
 
+_WYOMING_INFO_CACHE = None
+
+
 async def get_wyoming_info(args):
+    global _WYOMING_INFO_CACHE
+    if _WYOMING_INFO_CACHE is not None:
+        return _WYOMING_INFO_CACHE
+
     command = "say -v '?'"
     proc = await asyncio.create_subprocess_shell(
         command,
@@ -40,7 +47,7 @@ async def get_wyoming_info(args):
         for (voice_name, country_code) in results
     ]
 
-    return Info(
+    _WYOMING_INFO_CACHE = Info(
         tts=[
             TtsProgram(
                 name=args.service_name,
@@ -53,3 +60,4 @@ async def get_wyoming_info(args):
             )
         ],
     )
+    return _WYOMING_INFO_CACHE

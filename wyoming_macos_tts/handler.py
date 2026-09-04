@@ -159,16 +159,15 @@ class MacosTTSEventHandler(AsyncEventHandler):
             # Default voice
             voice_name = self.cli_args.voice
 
-        with (
-            tempfile.NamedTemporaryFile(mode="wb+", suffix=".wav") as output_file,
-            tempfile.NamedTemporaryFile(mode="wb+", suffix=".m4a") as m4a_file,
-        ):
-            command = ["say", "-o", m4a_file.name, text]
-            command += ["-v", voice_name] if voice_name else []
-            await self.run_command(command)
-            command = ["ffmpeg", "-y", "-loglevel", "quiet"]
-            command += ["-i", m4a_file.name, output_file.name]
-            await self.run_command(command)
+        with tempfile.NamedTemporaryFile(mode="wb+", suffix=".wav") as output_file:
+            command = [
+                "say",
+                "-o", output_file.name,
+                "--data-format=LEI16@22050",
+                "--file-format=WAVE",
+                "-f", "-",
+            ]
+            await self.run_command(command, stdin=text.encode())
 
             output_file.seek(0)
 
@@ -211,15 +210,16 @@ class MacosTTSEventHandler(AsyncEventHandler):
 
         return True
 
-    async def run_command(self, command):
+    async def run_command(self, command, stdin: Optional[bytes] = None):
         _LOGGER.debug(f"Runnning command: {' '.join(command)}")
         start_time = time.time()
         proc = await asyncio.create_subprocess_exec(
             *command,
-            stdout=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        _, stderr = await proc.communicate(input=stdin)
         end_time = time.time()
         _LOGGER.debug(f"Command execution duration: {end_time - start_time} seconds")
         if proc.returncode != 0:
