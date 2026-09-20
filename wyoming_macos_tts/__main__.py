@@ -3,13 +3,18 @@ import argparse
 import asyncio
 import logging
 import os
+import threading
 from functools import partial
 from logging.handlers import TimedRotatingFileHandler
+
+from CoreFoundation import CFRunLoopGetCurrent, CFRunLoopStop
+from Foundation import NSDate, NSRunLoop
 
 from wyoming.server import AsyncServer
 
 from . import __version__
 from .handler import MacosTTSEventHandler
+from .synth import Synthesizer
 
 _LOGGER = logging.getLogger("wyoming-macos-tts")
 
@@ -33,6 +38,12 @@ async def main() -> None:
     )
     parser.add_argument("--samples-per-chunk", type=int, default=1024)
     parser.add_argument(
+        "--cache-mb",
+        type=int,
+        default=32,
+        help="Megabytes of synthesized audio to keep for repeated phrases (0 disables)",
+    )
+    parser.add_argument(
         "--streaming",
         action="store_true",
         help="Enable audio streaming on sentence boundaries",
@@ -48,7 +59,7 @@ async def main() -> None:
         help="Directory to store the logs (leave empty to not save any logs)",
     )
     parser.add_argument(
-        "--log-keep-days", default=7, help="Number of days to keep logs"
+        "--log-keep-days", type=int, default=7, help="Number of days to keep logs"
     )
     parser.add_argument(
         "--version",
@@ -66,11 +77,16 @@ async def main() -> None:
         handler = TimedRotatingFileHandler(
             os.path.join(args.log_dir, "app.log"),
             when="midnight",
-            backupCount=int(args.log_keep_days),
+            backupCount=args.log_keep_days,
         )
         handler.setFormatter(logging.Formatter(args.log_format))
-        _LOGGER.addHandler(handler)
+        # Attach to the root logger so library output and unhandled
+        # exceptions end up in the log file too, not just our own messages.
+        logging.getLogger().addHandler(handler)
     _LOGGER.debug(f"Starting server with args: {args}")
+
+    synthesizer = Synthesizer(cache_bytes=max(0, args.cache_mb) * 1024 * 1024)
+    _LOGGER.debug("Loaded %d voices", len(synthesizer.voices))
 
     server = AsyncServer.from_uri(args.uri)
     _LOGGER.info("Ready")
@@ -79,12 +95,40 @@ async def main() -> None:
         partial(
             MacosTTSEventHandler,
             args,
+            synthesizer,
         )
     )
 
 
 def run():
-    asyncio.run(main())
+    """Serve on a worker thread; the main thread runs the CFRunLoop.
+
+    AVSpeechSynthesizer delivers its audio buffers on the main queue, so the
+    main thread has to stay available to process them.
+    """
+    error: list = []
+
+    def serve() -> None:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            pass
+        except BaseException as err:  # surface it after the run loop stops
+            error.append(err)
+        finally:
+            CFRunLoopStop(CFRunLoopGetCurrent())
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+
+    run_loop = NSRunLoop.currentRunLoop()
+    while thread.is_alive():
+        run_loop.runMode_beforeDate_(
+            "kCFRunLoopDefaultMode", NSDate.dateWithTimeIntervalSinceNow_(0.05)
+        )
+
+    if error:
+        raise error[0]
 
 
 if __name__ == "__main__":

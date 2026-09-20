@@ -1,12 +1,8 @@
 """Event handler for clients of the server."""
 
 import argparse
-import asyncio
 import logging
 import math
-import tempfile
-import time
-import wave
 from typing import Optional
 
 from sentence_stream import SentenceBoundaryDetector
@@ -24,6 +20,7 @@ from wyoming.tts import (
 )
 
 from .info import get_wyoming_info
+from .synth import CHANNELS, WIDTH, Synthesizer
 
 _LOGGER = logging.getLogger("wyoming-macos-tts")
 
@@ -32,19 +29,21 @@ class MacosTTSEventHandler(AsyncEventHandler):
     def __init__(
         self,
         cli_args: argparse.Namespace,
+        synthesizer: Synthesizer,
         *args,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
 
         self.cli_args = cli_args
+        self.synthesizer = synthesizer
         self.is_streaming: Optional[bool] = None
         self.sbd = SentenceBoundaryDetector()
         self._synthesize: Optional[Synthesize] = None
 
     async def handle_event(self, event: Event) -> bool:
         if Describe.is_type(event.type):
-            wyoming_info = await get_wyoming_info(self.cli_args)
+            wyoming_info = get_wyoming_info(self.cli_args, self.synthesizer)
             await self.write_event(wyoming_info.event())
             _LOGGER.debug("Sent info")
             return True
@@ -117,11 +116,7 @@ class MacosTTSEventHandler(AsyncEventHandler):
                 _LOGGER.debug("Text stream stopped")
                 return True
 
-            if not Synthesize.is_type(event.type):
-                return True
-
-            synthesize = Synthesize.from_event(event)
-            return await self._handle_synthesize(synthesize)
+            return True
         except Exception as err:
             await self.write_event(
                 Error(text=str(err), code=err.__class__.__name__).event()
@@ -131,8 +126,6 @@ class MacosTTSEventHandler(AsyncEventHandler):
     async def _handle_synthesize(
         self, synthesize: Synthesize, send_start: bool = True, send_stop: bool = True
     ) -> bool:
-        global _VOICE, _VOICE_NAME
-
         _LOGGER.debug(synthesize)
 
         raw_text = synthesize.text
@@ -153,75 +146,36 @@ class MacosTTSEventHandler(AsyncEventHandler):
 
         # Resolve voice
         _LOGGER.debug("synthesize: raw_text=%s, text='%s'", raw_text, text)
-        voice_name: Optional[str] = synthesize.voice.name
+        voice_name: Optional[str] = (
+            synthesize.voice.name if synthesize.voice is not None else None
+        )
 
-        if voice_name is None:
-            # Default voice
+        if not voice_name:
+            # Default voice (may be None -> the system default is used)
             voice_name = self.cli_args.voice
 
-        with tempfile.NamedTemporaryFile(mode="wb+", suffix=".wav") as output_file:
-            command = [
-                "say",
-                "-o", output_file.name,
-                "--data-format=LEI16@22050",
-                "--file-format=WAVE",
-                "-f", "-",
-            ]
-            await self.run_command(command, stdin=text.encode())
+        audio_bytes, rate = await self.synthesizer.synthesize(text, voice_name)
 
-            output_file.seek(0)
+        if send_start:
+            await self.write_event(
+                AudioStart(rate=rate, width=WIDTH, channels=CHANNELS).event(),
+            )
 
-            wav_file: wave.Wave_read = wave.open(output_file, "rb")
-            with wav_file:
-                rate = wav_file.getframerate()
-                width = wav_file.getsampwidth()
-                channels = wav_file.getnchannels()
+        # Split into chunks
+        bytes_per_chunk = WIDTH * CHANNELS * self.cli_args.samples_per_chunk
+        num_chunks = int(math.ceil(len(audio_bytes) / bytes_per_chunk))
+        for i in range(num_chunks):
+            offset = i * bytes_per_chunk
+            await self.write_event(
+                AudioChunk(
+                    audio=audio_bytes[offset : offset + bytes_per_chunk],
+                    rate=rate,
+                    width=WIDTH,
+                    channels=CHANNELS,
+                ).event(),
+            )
 
-                if send_start:
-                    await self.write_event(
-                        AudioStart(
-                            rate=rate,
-                            width=width,
-                            channels=channels,
-                        ).event(),
-                    )
-
-                # Audio
-                audio_bytes = wav_file.readframes(wav_file.getnframes())
-                bytes_per_sample = width * channels
-                bytes_per_chunk = bytes_per_sample * self.cli_args.samples_per_chunk
-                num_chunks = int(math.ceil(len(audio_bytes) / bytes_per_chunk))
-
-                # Split into chunks
-                for i in range(num_chunks):
-                    offset = i * bytes_per_chunk
-                    chunk = audio_bytes[offset : offset + bytes_per_chunk]
-                    await self.write_event(
-                        AudioChunk(
-                            audio=chunk,
-                            rate=rate,
-                            width=width,
-                            channels=channels,
-                        ).event(),
-                    )
-
-            if send_stop:
-                await self.write_event(AudioStop().event())
+        if send_stop:
+            await self.write_event(AudioStop().event())
 
         return True
-
-    async def run_command(self, command, stdin: Optional[bytes] = None):
-        _LOGGER.debug(f"Runnning command: {' '.join(command)}")
-        start_time = time.time()
-        proc = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate(input=stdin)
-        end_time = time.time()
-        _LOGGER.debug(f"Command execution duration: {end_time - start_time} seconds")
-        if proc.returncode != 0:
-            _LOGGER.error(stderr.decode())
-            raise Exception(f"Command failed with return code {proc.returncode}")
