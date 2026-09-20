@@ -30,7 +30,7 @@ async def test_macos_tts() -> None:
         "stdio://",
         "--debug",
         "--voice",
-        "Daniel (English (UK))",
+        "Daniel (en-GB)",
         stdin=PIPE,
         stdout=PIPE,
     )
@@ -52,7 +52,7 @@ async def test_macos_tts() -> None:
         assert len(tts.voices) > 0, "Expected at least one voice"
         print(tts.voices)
         voice_model = next(
-            (v for v in tts.voices if v.name == "Daniel (English (UK))"), None
+            (v for v in tts.voices if v.name == "Daniel (en-GB)"), None
         )
         assert voice_model is not None, "Expected Daniel voice"
         break
@@ -60,7 +60,7 @@ async def test_macos_tts() -> None:
     # Synthesize text
     await async_write_event(
         Synthesize(
-            "This is a test.", voice=SynthesizeVoice("Daniel (English (UK))")
+            "This is a test.", voice=SynthesizeVoice("Daniel (en-GB)")
         ).event(),
         proc.stdin,
     )

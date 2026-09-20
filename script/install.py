@@ -17,7 +17,7 @@ from wyoming.info import Describe
 
 _LAUNCHER_NAME = "WyomingTTS"
 _LABEL = "com.openhoster.wyoming-macos-tts"
-_REQUIREMENTS = ["uv", "ffmpeg"]
+_REQUIREMENTS = ["uv"]
 _DIR = Path(__file__).parent
 _PROGRAM_DIR = _DIR.parent
 _LAUNCHER_PATH = _PROGRAM_DIR / _LAUNCHER_NAME
